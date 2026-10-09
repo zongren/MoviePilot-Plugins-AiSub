@@ -3,7 +3,7 @@
 The plugin module (``plugins.v2/aisubv2/__init__.py``) imports MoviePilot and a
 few optional third-party packages.  None of them are installed in this
 environment, so we install lightweight stubs into :data:`sys.modules` *before*
-importing the plugin and then exercise the v2.3 configuration surface.
+importing the plugin and then exercise the v2.4 configuration surface.
 
 The MoviePilot ``get_config`` stub intentionally raises ``AssertionError`` for
 the ``"ChatGPT"`` key: the plugin no longer depends on the central ChatGPT
@@ -173,7 +173,7 @@ def _install_moviepilot_stubs():
             GET_CONFIG_KEYS.append(key)
             if key == "ChatGPT":
                 raise AssertionError(
-                    "插件不应再读取 MoviePilot 的 ChatGPT 配置（v2.3 已改为独立大模型配置）"
+                    "插件不应再读取 MoviePilot 的 ChatGPT 配置（已改为独立大模型配置）"
                 )
             return None
 
@@ -259,8 +259,8 @@ class AiSubV2PluginConfigTest(unittest.TestCase):
         self.plugin = plugin_module.AiSubV2()
 
     # -- 1. version -------------------------------------------------------
-    def test_plugin_version_is_2_3(self):
-        self.assertEqual(plugin_module.AiSubV2.plugin_version, "2.3")
+    def test_plugin_version_is_2_4(self):
+        self.assertEqual(plugin_module.AiSubV2.plugin_version, "2.4")
 
     # -- 2. defaults + removed keys --------------------------------------
     def test_get_form_defaults_and_removed_keys(self):
@@ -442,6 +442,39 @@ class AiSubV2PluginConfigTest(unittest.TestCase):
         bad["llm_api_key"] = ""
         self.plugin.init_plugin(bad)
         self.assertIsNone(self.plugin._llm_provider, "配置失效后不应保留旧客户端")
+
+    # -- 10. regression: V2 index/layout must match the host contract ----
+    def test_v2_index_and_layout_match_host_contract(self):
+        """
+        MoviePilot v2 resolves the plugin files as
+        ``contents/plugins[.{package_version}]/{pid.lower()}``; the pid was
+        found in ``package.v2.json`` (not ``package.json``), so the code must
+        live in ``plugins.v2/aisubv2`` and both indexes must agree.
+        """
+        import json
+
+        index_v2 = json.loads((REPO / "package.v2.json").read_text(encoding="utf-8"))
+        self.assertIn("AiSubV2", index_v2)
+        self.assertEqual(
+            index_v2["AiSubV2"]["version"],
+            plugin_module.AiSubV2.plugin_version,
+            "package.v2.json 的 version 必须与 plugin_version 一致",
+        )
+        self.assertIn(
+            f"v{plugin_module.AiSubV2.plugin_version}",
+            index_v2["AiSubV2"].get("history", {}),
+            "history 必须包含当前版本的变更说明",
+        )
+
+        # dir name == class name lowercased == pid.lower()
+        expected_dir = REPO / "plugins.v2" / plugin_module.AiSubV2.__name__.lower()
+        self.assertTrue((expected_dir / "__init__.py").is_file(), f"缺少插件目录 {expected_dir}")
+        self.assertEqual(expected_dir.name, "aisubv2")
+
+        # The v1 index must not advertise this V2-only plugin: the host would
+        # resolve it to ``plugins/aisubv2`` (v1 root) and 404.
+        index_v1 = json.loads((REPO / "package.json").read_text(encoding="utf-8"))
+        self.assertNotIn("AiSubV2", index_v1)
 
 
 if __name__ == "__main__":
