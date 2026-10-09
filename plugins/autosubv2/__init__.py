@@ -25,7 +25,9 @@ from app.log import logger
 from app.plugins import _PluginBase
 from app.utils.system import SystemUtils
 from plugins.autosubv2.ffmpeg import Ffmpeg
-from plugins.autosubv2.translate.openai_translate import OpenAi
+from plugins.autosubv2.translate import chinese
+from plugins.autosubv2.translate.openai_translate import create_provider
+from plugins.autosubv2.translate.srt_engine import SubtitleTranslator
 
 
 class UserInterruptException(Exception):
@@ -66,7 +68,7 @@ class AutoSubv2(_PluginBase):
     # 主题色
     plugin_color = "#2C4F7E"
     # 插件版本
-    plugin_version = "2.2"
+    plugin_version = "2.3"
     # 插件作者
     plugin_author = "TimoYoung"
     # 作者主页
@@ -94,12 +96,16 @@ class AutoSubv2(_PluginBase):
     _path_list = None
     _file_size = None
     _translate_zh = None
-    _openai = None
-    _enable_batch = None
-    _batch_size = None
-    _context_window = None
+    _zh_only = None
+    _ignore_if_chinese_exists = None
+    _llm_api_type = None
+    _llm_base_url = None
+    _llm_api_key = None
+    _llm_model = None
+    _llm_reasoning_effort = None
+    _llm_max_tokens = None
+    _llm_provider = None
     _max_retries = None
-    _enable_merge = None
     _enable_asr = None
     _huggingface_proxy = None
     _faster_whisper_model_path = None
@@ -118,6 +124,8 @@ class AutoSubv2(_PluginBase):
             self._path_list = list(set(config.get('path_list').split('\n')))
         self._send_notify = config.get('send_notify', False)
         self._file_size = int(config.get('file_size')) if config.get('file_size') else 10
+        # 配置是否完整可用（不完整时不再启动服务，但仍会走正常的停止流程）
+        config_ready = True
         # 字幕生成设置
         self._translate_preference = config.get('translate_preference', 'english_first')
         self._enable_asr = config.get('enable_asr', True)
@@ -127,37 +135,48 @@ class AutoSubv2(_PluginBase):
                                                          self.get_data_path() / "faster-whisper-models")
             self._huggingface_proxy = config.get('proxy', True)
         self._translate_zh = config.get('translate_zh', False)
+        self._zh_only = config.get('zh_only', False)
+        self._ignore_if_chinese_exists = config.get('ignore_if_chinese_exists', True)
+        # 每次初始化都先清空旧的大模型客户端，避免残留配置继续被使用
+        self._llm_provider = None
         if self._translate_zh:
-            chatgpt = self.get_config("ChatGPT")
-            if not chatgpt:
-                logger.error(f"翻译依赖于ChatGPT，请先维护ChatGPT插件")
-                return
-            openai_key = chatgpt and chatgpt.get("openai_key")
-            openai_url = chatgpt and chatgpt.get("openai_url")
-            openai_proxy = chatgpt and chatgpt.get("proxy")
-            openai_model = chatgpt and chatgpt.get("model")
-            if not openai_key:
-                logger.error(f"翻译依赖于ChatGPT，请先维护openai_key")
-                return
-            self._openai = OpenAi(api_key=openai_key, api_url=openai_url,
-                                  proxy=settings.PROXY if openai_proxy else None,
-                                  model=openai_model)
-            self._enable_batch = config.get('enable_batch', True)
-            self._batch_size = int(config.get('batch_size')) if config.get('batch_size') else 10
-            self._context_window = int(config.get('context_window')) if config.get('context_window') else 5
+            self._llm_api_type = config.get('llm_api_type', 'openai_chat')
+            self._llm_base_url = (config.get('llm_base_url') or '').strip()
+            self._llm_api_key = (config.get('llm_api_key') or '').strip()
+            self._llm_model = (config.get('llm_model') or '').strip()
+            self._llm_reasoning_effort = config.get('llm_reasoning_effort', 'high')
+            self._llm_max_tokens = int(config.get('llm_max_tokens')) if config.get('llm_max_tokens') else 64000
             self._max_retries = int(config.get('max_retries')) if config.get('max_retries') else 3
-            self._enable_merge = config.get('enable_merge', False)
+            if not self._llm_base_url or not self._llm_api_key or not self._llm_model:
+                logger.error("翻译依赖于独立的大模型配置，请先维护 llm_base_url / llm_api_key / llm_model")
+                config_ready = False
+            else:
+                try:
+                    self._llm_provider = create_provider(
+                        api_type=self._llm_api_type,
+                        base_url=self._llm_base_url,
+                        api_key=self._llm_api_key,
+                        model=self._llm_model,
+                        reasoning_effort=self._llm_reasoning_effort,
+                        max_tokens=self._llm_max_tokens,
+                    )
+                except Exception as e:
+                    logger.error(f"初始化大模型客户端失败：{e}")
+                    config_ready = False
+                else:
+                    logger.info(
+                        f"大模型翻译已启用：{self._llm_api_type} @ {self._llm_base_url}，模型 {self._llm_model}"
+                    )
 
         if self._clear_history:
             config['clear_history'] = False
             self.update_config(config)
             self.clear_tasks()
-        if self._enabled:
+        # asr 配置检查
+        if self._enable_asr and not self.__check_asr():
+            config_ready = False
+        if self._enabled and config_ready:
             logger.info("AI生成字幕服务已启动")
-            # asr 配置检查
-            if self._enable_asr and not self.__check_asr():
-                return
-
             if not self._running:
                 self._task_queue = queue.Queue()
                 self._consumer_thread = threading.Thread(target=self._consume_tasks, daemon=True)
@@ -333,7 +352,11 @@ class AutoSubv2(_PluginBase):
 
         try:
             logger.info(f"开始处理文件：{video_file} ...")
-            # 判断目的字幕（和内嵌）是否已存在
+            # 已存在中文字幕（外挂/内嵌）时跳过
+            if self._ignore_if_chinese_exists and self.__chinese_subtitle_exists(video_file):
+                logger.warn(f"已存在中文字幕，不进行处理")
+                return TaskStatus.IGNORED
+            # 目标字幕（不翻译时）是否已存在
             if self.__target_subtitle_exists(video_file):
                 logger.warn(f"字幕文件已经存在，不进行处理")
                 return TaskStatus.IGNORED
@@ -348,8 +371,14 @@ class AutoSubv2(_PluginBase):
             if self._translate_zh:
                 # 翻译字幕
                 logger.info(f"开始翻译字幕为中文 ...")
-                self.__translate_zh_subtitle(lang, gen_sub_path, f"{file_path}.zh.机翻.srt")
+                result = self.__translate_zh_subtitle(lang, gen_sub_path, f"{file_path}.zh.机翻.srt")
                 logger.info(f"翻译字幕完成：{file_name}.zh.机翻.srt")
+                if result and result.unrecovered and self._send_notify:
+                    self.post_message(
+                        mtype=NotificationType.Plugin,
+                        title="【自动字幕生成】",
+                        text=f" 媒体: {file_name}\n 有 {result.unrecovered} 条字幕未能翻译，已保留原文",
+                    )
 
             end_time = time.time()
             message = f" 媒体: {file_name}\n 处理完成\n 字幕原始语言: {lang}\n "
@@ -581,17 +610,6 @@ class AutoSubv2(_PluginBase):
                     yield cur_path
 
     @staticmethod
-    def __load_srt(file_path):
-        """
-        加载字幕文件
-        :param file_path: 字幕文件路径
-        :return:
-        """
-        with open(file_path, 'r', encoding="utf8") as f:
-            srt_text = f.read()
-        return list(srt.parse(srt_text))
-
-    @staticmethod
     def __save_srt(file_path, srt_data):
         """
         保存字幕文件
@@ -722,7 +740,7 @@ class AutoSubv2(_PluginBase):
             'hdmv_pgs_subtitle',
         )
 
-        if prefer_lang is str and prefer_lang:
+        if isinstance(prefer_lang, str) and prefer_lang:
             prefer_lang = [prefer_lang]
 
         # 获取首选字幕
@@ -775,103 +793,71 @@ class AutoSubv2(_PluginBase):
         noisy_tokens = [('(', ')'), ('[', ']'), ('{', '}'), ('【', '】'), ('♪', '♪'), ('♫', '♫'), ('♪♪', '♪♪')]
         return any(content.startswith(t[0]) and content.endswith(t[1]) for t in noisy_tokens)
 
-    def __get_context(self, all_subs: list, target_indices: List[int], is_batch: bool) -> str:
-        """通用上下文获取方法"""
-        min_idx = max(0, min(target_indices) - self._context_window)
-        max_idx = min(len(all_subs) - 1, max(target_indices) + self._context_window) if is_batch else min(
-            target_indices)
-
-        context = []
-        for idx in range(min_idx, max_idx + 1):
-            status = "[待译]" if idx in target_indices else ""
-            content = all_subs[idx].content.replace('\n', ' ').strip()
-            context.append(f"{status}{content}")
-
-        return "\n".join(context)
-
-    def __process_items(self, all_subs: list, items: list) -> list:
-        """统一处理入口（支持批量和单条）"""
-        if self._enable_batch and len(items) > 1:
-            return self.__process_batch(all_subs, items)
-        return [self.__process_single(all_subs, item) for item in items]
-
-    def __translate_to_zh(self, text: str, context: str = None) -> str:
+    def __check_interrupt(self):
+        """用户中断任务时抛出异常"""
         if self._event.is_set():
             raise UserInterruptException(f"用户中断当前任务")
-        return self._openai.translate_to_zh(text, context)
-
-    def __process_batch(self, all_subs: list, batch: list) -> list:
-        """批量处理逻辑"""
-        indices = [all_subs.index(item) for item in batch]
-        context = self.__get_context(all_subs, indices, is_batch=True) if self._context_window > 0 else None
-        batch_text = '\n'.join([item.content for item in batch])
-
-        try:
-            ret, result = self.__translate_to_zh(batch_text, context)
-            if not ret:
-                raise Exception(result)
-
-            translated = [line.strip() for line in result.split('\n') if line.strip()]
-            if len(translated) != len(batch):
-                raise Exception(f"批次行数不匹配 {len(translated)}/{len(batch)}")
-
-            for item, trans in zip(batch, translated):
-                item.content = f"{trans}\n{item.content}"
-            self._stats['batch_success'] += len(batch)
-            return batch
-        except Exception as e:
-            logger.warning(f"批次翻译失败（{str(e)}），降级到单行匹配...")
-            self._stats['batch_fail'] += 1
-            return [self.__process_single(all_subs, item) for item in batch]
-
-    def __process_single(self, all_subs: List[srt.Subtitle], item: srt.Subtitle) -> srt.Subtitle:
-        """单条处理逻辑"""
-        for _ in range(self._max_retries):
-            idx = all_subs.index(item)
-            context = self.__get_context(all_subs, [idx], is_batch=False) if self._context_window > 0 else None
-            success, trans = self.__translate_to_zh(item.content, context)
-
-            if success:
-                item.content = f"{trans}\n{item.content}"
-                self._stats['line_fallback'] += 1
-                return item
-
-            time.sleep(1)
-
-        item.content = f"[翻译失败]\n{item.content}"
-        return item
 
     def __translate_zh_subtitle(self, source_lang: str, source_subtitle: str, dest_subtitle: str):
-        self._stats = {'total': 0, 'batch_success': 0, 'batch_fail': 0, 'line_fallback': 0}
-        subs = self.__load_srt(source_subtitle)
-        if source_lang in ["en", "eng"] and self._enable_merge:
-            valid_subs = self.__merge_srt(subs)
-            logger.info(f"英文字幕合并：合并前字幕数: {len(subs)},合并后字幕数: {len(valid_subs)}")
-        else:
-            valid_subs = subs
-        self._stats['total'] = len(valid_subs)
-        processed = []
-        current_batch = []
+        """
+        使用大模型整文件翻译字幕为中文
 
-        for item in valid_subs:
-            current_batch.append(item)
+        :param source_lang: 源字幕语言（仅用于日志）
+        :param source_subtitle: 源字幕文件路径
+        :param dest_subtitle: 目标字幕文件路径
+        :return: TranslationResult
+        """
+        logger.info(f"整文件翻译：{source_subtitle} -> {dest_subtitle}（源语言 {source_lang}）")
+        translator = SubtitleTranslator(
+            provider=self._llm_provider,
+            zh_only=self._zh_only,
+            max_retries=self._max_retries,
+            logger=logger,
+            interrupt_check=self.__check_interrupt,
+        )
+        result = translator.translate_file(str(source_subtitle), str(dest_subtitle))
+        if result.unrecovered:
+            logger.warn(f"仍有 {result.unrecovered} 条字幕未翻译完成，已保留原文")
+        return result
 
-            if len(current_batch) >= self._batch_size:
-                processed += self.__process_items(valid_subs, current_batch)
-                current_batch = []
-                logger.info(f"进度: {len(processed)}/{len(valid_subs)}")
+    def __extract_embedded_subtitle_for_sniff(self, video_file, subtitle_index):
+        """
+        提取内嵌字幕到临时 srt 文件用于中文内容嗅探，失败返回 None
+        """
+        fd, temp_path = tempfile.mkstemp(prefix='autosub-sniff-', suffix='.srt')
+        os.close(fd)
+        if Ffmpeg().extract_subtitle_from_video(video_file, temp_path, subtitle_index):
+            return temp_path
+        try:
+            os.remove(temp_path)
+        except OSError:
+            pass
+        return None
 
-        if current_batch:
-            processed += self.__process_items(valid_subs, current_batch)
-
-        self.__save_srt(dest_subtitle, processed)
-        logger.info(f"""
-    翻译完成！
-    总处理条目: {self._stats['total']}
-    批次成功: {self._stats['batch_success']} ({(self._stats['batch_success'] / self._stats['total']) * 100:.1f}%)
-    批次失败: {self._stats['batch_fail']}
-    行补偿翻译: {self._stats['line_fallback']}
-            """)
+    def __chinese_subtitle_exists(self, video_file) -> bool:
+        """
+        判断视频是否已存在中文字幕（外挂或内嵌）
+        """
+        try:
+            found, file_name = chinese.find_external_chinese_subtitle(video_file)
+            if found:
+                logger.info(f"检测到外挂中文字幕：{file_name}")
+                return True
+        except Exception as e:
+            logger.warn(f"检测外挂中文字幕失败：{e}")
+        try:
+            video_meta = Ffmpeg().get_video_metadata(video_file)
+            if video_meta:
+                found, info = chinese.find_embedded_chinese_subtitle(
+                    video_meta,
+                    lambda index: self.__extract_embedded_subtitle_for_sniff(video_file, index),
+                )
+                if found:
+                    logger.info(f"检测到内嵌中文字幕：{info}")
+                    return True
+        except Exception as e:
+            logger.warn(f"检测内嵌中文字幕失败：{e}")
+        return False
 
     @staticmethod
     def __external_subtitle_exists(video_file, prefer_langs=None, only_srt=False, strict=True):
@@ -959,23 +945,22 @@ class AutoSubv2(_PluginBase):
 
     def __target_subtitle_exists(self, video_file):
         """
-        目标字幕文件是否存在
+        目标字幕文件是否存在（不翻译时用于跳过重复生成）
+        翻译场景下的中文字幕检测由 __chinese_subtitle_exists 负责
         :param video_file:
         :return:
         """
         if self._translate_zh:
-            prefer_langs = ['zh', 'chi', 'zh-CN', 'chs', 'zhs', 'zh-Hans', 'zhong', 'simp', 'cn']
+            return False
+        if self._translate_preference == "english_first":
+            prefer_langs = ['en', 'eng']
+            strict = False
+        elif self._translate_preference == "english_only":
+            prefer_langs = ['en', 'eng']
             strict = True
         else:
-            if self._translate_preference == "english_first":
-                prefer_langs = ['en', 'eng']
-                strict = False
-            elif self._translate_preference == "english_only":
-                prefer_langs = ['en', 'eng']
-                strict = True
-            else:
-                prefer_langs = None
-                strict = False
+            prefer_langs = None
+            strict = False
 
         exist, lang, _ = self.__external_subtitle_exists(video_file, prefer_langs, strict=strict)
         if exist:
@@ -986,7 +971,7 @@ class AutoSubv2(_PluginBase):
             return False
         ret, subtitle_index, subtitle_lang = self.__get_video_prefer_subtitle(video_meta, prefer_lang=prefer_langs,
                                                                               only_srt=False)
-        if ret and subtitle_lang in prefer_langs:
+        if ret and (not prefer_langs or subtitle_lang in prefer_langs):
             return True
 
         return False
@@ -1143,7 +1128,21 @@ class AutoSubv2(_PluginBase):
                                         'props': {
                                             'model': 'translate_zh',
                                             'label': '翻译成中文',
-                                            'hint': '需要配置ChatGPT插件'
+                                            'hint': '使用下方独立配置的大模型接口整文件翻译'
+                                        }
+                                    }
+                                ]
+                            },
+                            {
+                                'component': 'VCol',
+                                'props': {'cols': 12, 'md': 4},
+                                'content': [
+                                    {
+                                        'component': 'VSwitch',
+                                        'props': {
+                                            'model': 'ignore_if_chinese_exists',
+                                            'label': '已存在中文字幕则跳过',
+                                            'hint': '外挂或内嵌字幕中已检测到中文时，跳过该视频'
                                         }
                                     }
                                 ]
@@ -1223,11 +1222,103 @@ class AutoSubv2(_PluginBase):
                                                         'props': {'cols': 12, 'md': 4},
                                                         'content': [
                                                             {
+                                                                'component': 'VSelect',
+                                                                'props': {
+                                                                    'model': 'llm_api_type',
+                                                                    'label': '接口类型',
+                                                                    'items': [
+                                                                        {'title': 'OpenAI Chat Completions',
+                                                                         'value': 'openai_chat'},
+                                                                        {'title': 'OpenAI Responses',
+                                                                         'value': 'openai_responses'},
+                                                                        {'title': 'Anthropic Messages',
+                                                                         'value': 'anthropic_messages'}
+                                                                    ]
+                                                                }
+                                                            }
+                                                        ]
+                                                    },
+                                                    {
+                                                        'component': 'VCol',
+                                                        'props': {'cols': 12, 'md': 8},
+                                                        'content': [
+                                                            {
                                                                 'component': 'VTextField',
                                                                 'props': {
-                                                                    'model': 'context_window',
-                                                                    'label': '上下文窗口大小',
-                                                                    'placeholder': '5'
+                                                                    'model': 'llm_base_url',
+                                                                    'label': 'Base URL',
+                                                                    'placeholder': 'https://api.deepseek.com'
+                                                                }
+                                                            }
+                                                        ]
+                                                    }
+                                                ]
+                                            },
+                                            {
+                                                'component': 'VRow',
+                                                'content': [
+                                                    {
+                                                        'component': 'VCol',
+                                                        'props': {'cols': 12, 'md': 4},
+                                                        'content': [
+                                                            {
+                                                                'component': 'VTextField',
+                                                                'props': {
+                                                                    'model': 'llm_api_key',
+                                                                    'type': 'password',
+                                                                    'label': 'API Key',
+                                                                    'placeholder': 'sk-...'
+                                                                }
+                                                            }
+                                                        ]
+                                                    },
+                                                    {
+                                                        'component': 'VCol',
+                                                        'props': {'cols': 12, 'md': 4},
+                                                        'content': [
+                                                            {
+                                                                'component': 'VTextField',
+                                                                'props': {
+                                                                    'model': 'llm_model',
+                                                                    'label': '模型名称',
+                                                                    'placeholder': 'deepseek-flash'
+                                                                }
+                                                            }
+                                                        ]
+                                                    },
+                                                    {
+                                                        'component': 'VCol',
+                                                        'props': {'cols': 12, 'md': 4},
+                                                        'content': [
+                                                            {
+                                                                'component': 'VSelect',
+                                                                'props': {
+                                                                    'model': 'llm_reasoning_effort',
+                                                                    'label': '推理强度',
+                                                                    'items': [
+                                                                        {'title': '低', 'value': 'low'},
+                                                                        {'title': '高', 'value': 'high'},
+                                                                        {'title': '最高', 'value': 'max'}
+                                                                    ]
+                                                                }
+                                                            }
+                                                        ]
+                                                    }
+                                                ]
+                                            },
+                                            {
+                                                'component': 'VRow',
+                                                'content': [
+                                                    {
+                                                        'component': 'VCol',
+                                                        'props': {'cols': 12, 'md': 4},
+                                                        'content': [
+                                                            {
+                                                                'component': 'VTextField',
+                                                                'props': {
+                                                                    'model': 'llm_max_tokens',
+                                                                    'label': '最大输出token数',
+                                                                    'placeholder': '64000'
                                                                 }
                                                             }
                                                         ]
@@ -1253,8 +1344,9 @@ class AutoSubv2(_PluginBase):
                                                             {
                                                                 'component': 'VSwitch',
                                                                 'props': {
-                                                                    'model': 'enable_merge',
-                                                                    'label': '翻译英文时合并整句'
+                                                                    'model': 'zh_only',
+                                                                    'label': '仅输出中文',
+                                                                    'hint': '关闭时输出译文+原文双语'
                                                                 }
                                                             }
                                                         ]
@@ -1266,48 +1358,15 @@ class AutoSubv2(_PluginBase):
                                                 'content': [
                                                     {
                                                         'component': 'VCol',
-                                                        'props': {'cols': 12, 'md': 4},
-                                                        'content': [
-                                                            {
-                                                                'component': 'VSwitch',
-                                                                'props': {
-                                                                    'model': 'enable_batch',
-                                                                    'label': '启用批量翻译'
-                                                                }
-                                                            }
-                                                        ]
-                                                    },
-                                                    {
-                                                        'component': 'VCol',
-                                                        'props': {'cols': 12, 'md': 4, 'v-show': 'enable_batch'},
-                                                        'content': [
-                                                            {
-                                                                'component': 'VTextField',
-                                                                'props': {
-                                                                    'model': 'batch_size',
-                                                                    'label': '每批翻译行数',
-                                                                    'placeholder': '10'
-                                                                }
-                                                            }
-                                                        ]
-                                                    }
-                                                ]
-                                            },
-                                            {
-                                                'component': 'VRow',
-                                                'content': [
-                                                    {
-                                                        'component': 'VCol',
-                                                        'props': {
-                                                            'cols': 12,
-                                                        },
+                                                        'props': {'cols': 12},
                                                         'content': [
                                                             {
                                                                 'component': 'VAlert',
                                                                 'props': {
                                                                     'type': 'info',
                                                                     'variant': 'tonal',
-                                                                    'text': '翻译依赖 ChatGPT 插件配置'
+                                                                    'text': '按字幕序号整文件翻译，时间轴原样保留；'
+                                                                            '响应被截断时自动补译并回退为分块翻译。'
                                                                 }
                                                             }
                                                         ]
@@ -1369,14 +1428,18 @@ class AutoSubv2(_PluginBase):
             "file_size": "10",
             "translate_preference": "english_first",
             "translate_zh": False,
+            "ignore_if_chinese_exists": True,
             "enable_asr": True,
             "faster_whisper_model": "base",
             "proxy": True,
-            "context_window": 5,
+            "llm_api_type": "openai_chat",
+            "llm_base_url": "",
+            "llm_api_key": "",
+            "llm_model": "",
+            "llm_reasoning_effort": "high",
+            "llm_max_tokens": 64000,
             "max_retries": 3,
-            "enable_merge": False,
-            "enable_batch": True,
-            "batch_size": 10,
+            "zh_only": False,
         }
 
     def get_api(self) -> List[Dict[str, Any]]:
