@@ -21,7 +21,7 @@ import time
 from pathlib import Path
 
 _ROOT = Path(__file__).resolve().parents[1]
-sys.path.insert(0, str(_ROOT / "plugins" / "AiSubV2"))
+sys.path.insert(0, str(_ROOT / "plugins.v2" / "aisubv2"))
 
 from translate.openai_translate import LLMError, create_provider  # noqa: E402
 from translate.srt_engine import CHUNK_SIZE, read_srt_file, translate_srt_file  # noqa: E402

@@ -1,6 +1,6 @@
-"""Standalone configuration tests for the autoSubV2 plugin.
+"""Standalone configuration tests for the AiSubV2 plugin.
 
-The plugin module (``plugins/AiSubV2/__init__.py``) imports MoviePilot and a
+The plugin module (``plugins.v2/aisubv2/__init__.py``) imports MoviePilot and a
 few optional third-party packages.  None of them are installed in this
 environment, so we install lightweight stubs into :data:`sys.modules` *before*
 importing the plugin and then exercise the v2.3 configuration surface.
@@ -19,8 +19,12 @@ import unittest
 
 
 REPO = pathlib.Path(__file__).resolve().parents[3]
-if str(REPO) not in sys.path:
-    sys.path.insert(0, str(REPO))
+# The source directory is ``plugins.v2/``, whose name is not a valid Python
+# identifier, so the plugin package is imported under its runtime name
+# (``aisubv2``) -- the same name MoviePilot uses as ``app.plugins.aisubv2``.
+PLUGIN_ROOT = REPO / "plugins.v2"
+if str(PLUGIN_ROOT) not in sys.path:
+    sys.path.insert(0, str(PLUGIN_ROOT))
 
 
 # ---------------------------------------------------------------------------
@@ -216,7 +220,7 @@ def _install_third_party_stubs():
 _install_moviepilot_stubs()
 _install_third_party_stubs()
 
-import plugins.AiSubV2 as plugin_module  # noqa: E402  (import after stubbing)
+import aisubv2 as plugin_module  # noqa: E402  (import after stubbing)
 
 
 PLUGIN_API_MODELS = [

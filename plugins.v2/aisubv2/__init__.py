@@ -24,10 +24,10 @@ from app.schemas.types import NotificationType, EventType
 from app.log import logger
 from app.plugins import _PluginBase
 from app.utils.system import SystemUtils
-from plugins.AiSubV2.ffmpeg import Ffmpeg
-from plugins.AiSubV2.translate import chinese
-from plugins.AiSubV2.translate.openai_translate import create_provider
-from plugins.AiSubV2.translate.srt_engine import SubtitleTranslator
+from .ffmpeg import Ffmpeg
+from .translate import chinese
+from .translate.openai_translate import create_provider
+from .translate.srt_engine import SubtitleTranslator
 
 
 class UserInterruptException(Exception):
@@ -1400,7 +1400,7 @@ class AiSubV2(_PluginBase):
                                             {
                                                 'component': 'a',
                                                 'props': {
-                                                    'href': 'https://github.com/zongren/MoviePilot-Plugins-AiSub/blob/main/plugins/AiSubV2/README.md',
+                                                    'href': 'https://github.com/zongren/MoviePilot-Plugins-AiSub/blob/main/plugins.v2/aisubv2/README.md',
                                                     'target': '_blank'
                                                 },
                                                 'content': [

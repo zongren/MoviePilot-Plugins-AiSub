@@ -6,7 +6,7 @@ import sys
 import tempfile
 import unittest
 
-sys.path.insert(0, str(pathlib.Path(__file__).resolve().parents[1]))  # plugins/AiSubV2
+sys.path.insert(0, str(pathlib.Path(__file__).resolve().parents[1]))  # plugins.v2/aisubv2
 
 from translate.chinese import (  # noqa: E402
     CHINESE_LANG_TAGS,
