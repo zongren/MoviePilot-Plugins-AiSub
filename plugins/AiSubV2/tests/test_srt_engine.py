@@ -2,7 +2,7 @@
 
 Run with::
 
-    python3 -m unittest discover -s plugins/autosubv2/tests -p 'test_srt_engine.py' -v
+    python3 -m unittest discover -s plugins/AiSubV2/tests -p 'test_srt_engine.py' -v
 """
 
 import json
@@ -12,7 +12,7 @@ import pathlib
 import tempfile
 import unittest
 
-sys.path.insert(0, str(pathlib.Path(__file__).resolve().parents[1]))  # plugins/autosubv2
+sys.path.insert(0, str(pathlib.Path(__file__).resolve().parents[1]))  # plugins/AiSubV2
 
 from translate.srt_engine import (  # noqa: E402
     CHUNK_SIZE,

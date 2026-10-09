@@ -1,6 +1,6 @@
 """Standalone configuration tests for the autoSubV2 plugin.
 
-The plugin module (``plugins/autosubv2/__init__.py``) imports MoviePilot and a
+The plugin module (``plugins/AiSubV2/__init__.py``) imports MoviePilot and a
 few optional third-party packages.  None of them are installed in this
 environment, so we install lightweight stubs into :data:`sys.modules` *before*
 importing the plugin and then exercise the v2.3 configuration surface.
@@ -158,7 +158,7 @@ def _install_moviepilot_stubs():
         def get_data_path(self):
             if self._stub_data_path is None:
                 self._stub_data_path = pathlib.Path(
-                    tempfile.mkdtemp(prefix="autosubv2-stub-")
+                    tempfile.mkdtemp(prefix="AiSubV2-stub-")
                 )
             return self._stub_data_path
 
@@ -216,7 +216,7 @@ def _install_third_party_stubs():
 _install_moviepilot_stubs()
 _install_third_party_stubs()
 
-import plugins.autosubv2 as plugin_module  # noqa: E402  (import after stubbing)
+import plugins.AiSubV2 as plugin_module  # noqa: E402  (import after stubbing)
 
 
 PLUGIN_API_MODELS = [
@@ -247,16 +247,16 @@ def _iter_model_props(node):
             yield from _iter_model_props(item)
 
 
-class AutoSubv2PluginConfigTest(unittest.TestCase):
+class AiSubV2PluginConfigTest(unittest.TestCase):
     def setUp(self):
         LOG_RECORDS.clear()
         GET_CONFIG_KEYS.clear()
         POSTED_MESSAGES.clear()
-        self.plugin = plugin_module.AutoSubv2()
+        self.plugin = plugin_module.AiSubV2()
 
     # -- 1. version -------------------------------------------------------
     def test_plugin_version_is_2_3(self):
-        self.assertEqual(plugin_module.AutoSubv2.plugin_version, "2.3")
+        self.assertEqual(plugin_module.AiSubV2.plugin_version, "2.3")
 
     # -- 2. defaults + removed keys --------------------------------------
     def test_get_form_defaults_and_removed_keys(self):
@@ -337,7 +337,7 @@ class AutoSubv2PluginConfigTest(unittest.TestCase):
         }
         for api_type, class_name in cases.items():
             with self.subTest(api_type=api_type):
-                plugin = plugin_module.AutoSubv2()
+                plugin = plugin_module.AiSubV2()
                 plugin.init_plugin(
                     {
                         "enabled": False,

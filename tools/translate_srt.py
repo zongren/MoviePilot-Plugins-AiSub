@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Standalone CLI for the autosubv2 whole-file SRT translator.
+"""Standalone CLI for the AiSubV2 whole-file SRT translator.
 
 Runs the exact same engine the MoviePilot plugin uses, without MoviePilot::
 
@@ -21,7 +21,7 @@ import time
 from pathlib import Path
 
 _ROOT = Path(__file__).resolve().parents[1]
-sys.path.insert(0, str(_ROOT / "plugins" / "autosubv2"))
+sys.path.insert(0, str(_ROOT / "plugins" / "AiSubV2"))
 
 from translate.openai_translate import LLMError, create_provider  # noqa: E402
 from translate.srt_engine import CHUNK_SIZE, read_srt_file, translate_srt_file  # noqa: E402
@@ -73,7 +73,7 @@ def verify_timing(source: str, output: str) -> bool:
 
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
-        description="Whole-file LLM SRT translation (autosubv2 engine, standalone).",
+        description="Whole-file LLM SRT translation (AiSubV2 engine, standalone).",
         formatter_class=argparse.ArgumentDefaultsHelpFormatter,
     )
     parser.add_argument("input", help="源 SRT 文件路径")

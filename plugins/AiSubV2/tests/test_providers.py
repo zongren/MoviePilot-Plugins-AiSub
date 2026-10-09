@@ -1,6 +1,6 @@
 import sys, pathlib
 
-sys.path.insert(0, str(pathlib.Path(__file__).resolve().parents[1]))  # plugins/autosubv2
+sys.path.insert(0, str(pathlib.Path(__file__).resolve().parents[1]))  # plugins/AiSubV2
 from translate.openai_translate import (
     AnthropicMessagesProvider,
     BaseLLMProvider,

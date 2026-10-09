@@ -1,4 +1,4 @@
-"""Subtitle translation package for the autosubv2 plugin.
+"""Subtitle translation package for the AiSubV2 plugin.
 
 Modules
 -------
